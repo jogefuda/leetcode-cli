@@ -31,7 +31,7 @@ struct SubmitArgs {
 }
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> anyhow::Result<()> {
     dotenv().ok();
     let command = Cli::parse();
     let csrftoken = env::var("csrftoken").unwrap_or_default();
@@ -45,9 +45,13 @@ async fn main() -> std::io::Result<()> {
         Action::Test(args) => {
             let code = io::read_from_file(&args.file)?;
             client.test_code(&args.id, &args.lang, &code).await
-                .map(LeetCode::pretty_test_result);
+                .map(LeetCode::pretty_test_result)?;
         },
-        Action::Submit(_) => todo!(),
+        Action::Submit(args) => {
+            let code = io::read_from_file(&args.file)?;
+            client.submit_code(&args.id, &args.lang, &code).await
+                .map(LeetCode::pretty_submit_result)?;
+        },
     }
 
     Ok(())

@@ -18,10 +18,11 @@ pub trait Provider {
     async fn get_problem(&self, q: &str) -> Result<Self::ProblemDetial>;
     async fn get_problems(&self) -> Result<Vec<Self::Problem>>;
     async fn test_code(&self, q: &str, lang: &str, typed_code: &str) -> Result<Self::TestResult>;
+    async fn submit_code(&self, q: &str, lang: &str, typed_code: &str) -> Result<Self::SubmitResult>;
     fn load_from_cache(&self) -> Option<Vec<Self::Problem>> {
         let mut path = io::get_cache_folder(self.name())?;
         path.push("problems.json");
-        let json = io::read_from_file(path.to_str().unwrap()).ok()?;
+        let json = io::read_from_file(path).ok()?;
         Some(serde_json::from_str::<Vec<Self::Problem>>(&json).ok()?)
     }
 
@@ -30,7 +31,6 @@ pub trait Provider {
         let mut path = io::get_cache_folder(self.name())
             .ok_or(anyhow::anyhow!("cache folder not exist"))?;
         path.push("problems.json");
-        io::write_to_file(path.to_str().unwrap(), &json);
-        Ok(())
+        Ok(io::write_to_file(path, &json)?)
     }
 }

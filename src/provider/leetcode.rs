@@ -62,23 +62,56 @@ impl LeetCode {
         }
     }
 
-    // pub fn pretty_submit_result(result: SubmitResult) {
-    //     todo!()
-    // }
+    pub fn pretty_submit_result(result: SubmitResult) {
+        let runtime = result.status_runtime.unwrap_or_default();
+        let memory = result.status_memory.unwrap_or_default();
+        let runtime_percent = result.runtime_percentile.unwrap_or_default();
+        let memory_percent = result.memory_percentile.unwrap_or_default();
+        let total_correct = result.total_correct.map(|v| v.to_string()).unwrap_or("N/A".to_string());
+        let total_testcases = result.total_testcases.map(|v| v.to_string()).unwrap_or("N/A".to_string());
+        match (result.status_msg.as_deref(), result.run_success) {
+            (Some("Accepted"), Some(true)) => {
+                println!("{} {}/{}", "✔ Accepted".green(), total_correct.green(), total_testcases.green());
+                println!("{} {}/{}, {} {}/{}", "Runtime: ".green(), runtime, runtime_percent, "Memory: ".green(), memory, memory_percent);
+            },
+            (Some("Accepted"), Some(false)) => {
+                println!("{} {}/{}", "✘ WA".red(), total_correct.red(), total_testcases.red());
+            },
+            (Some(msg), None) => {
+                println!("{} {}", "✘ ".red(), msg.red());
+                if let Some(compile_msg) = result.compile_error {
+                    println!("{}", compile_msg.red());
+                }
+            },
+            (_, _) => unreachable!()
+        }
+    }
 
-    async fn get_result<T: JudgeResult>(&self, result_url: &str) -> Result<T>
+    async fn get_result<T: JudgeResult>(&self, id: &str) -> Result<T>
         where for <'de> T: Deserialize<'de>
     {
         let mut ticker = interval(Duration::from_millis(250));
+        let result_url = format!("https://leetcode.com/submissions/detail/{}/check/", id);
         loop {
-            let result = self.client.get(result_url)
-                .send().await?
-                .json::<T>().await?;
+            ticker.tick().await;
+            let result = self.client.get(&result_url)
+               .headers(self.headers())
+               .send().await?
+               .json::<T>().await?;
             if result.get_state() == "SUCCESS" {
                 break Ok(result)
             }
-            ticker.tick().await;
         }
+    }
+
+    async fn post<REQ: Serialize, RESP>(&self, url: &str, body: &REQ) -> Result<RESP>
+        where RESP: for<'de> Deserialize<'de>
+    {
+        Ok(self.client.post(url)
+            .headers(self.headers())
+            .json(&body)
+            .send().await?
+            .json::<RESP>().await?)
     }
 
     fn headers(&self) -> HeaderMap {
@@ -108,7 +141,7 @@ struct TestRequest {
 }
 
 impl TestRequest {
-    fn new(p: &LeetCodeProblemDetial, lang: &str, typed_code: &str) -> (String, Self) {
+    fn new(p: &ProblemDetial, lang: &str, typed_code: &str) -> (String, Self) {
         (format!("https://leetcode.com/problems/{}/interpret_solution/", p.title_slug),
             Self {
                 data_input: p.example_testcases.to_owned(),
@@ -146,16 +179,38 @@ impl JudgeResult for TestResult {
 
 #[derive(Serialize)]
 struct SubmitRequest {
+    lang: String,
+    question_id: String,
+    typed_code: String
 }
 
+impl SubmitRequest {
+    fn new(p: &ProblemDetial, lang: &str, typed_code: &str) -> (String, Self) {
+        let url = format!("https://leetcode.com/problems/{}/submit/", p.title_slug);
+        (url, Self {
+            lang: lang.to_owned(),
+            question_id: p.question_frontend_id.to_owned(),
+            typed_code: typed_code.to_owned()
+        })
+    }
+}
 #[derive(Deserialize, Debug)]
 struct SubmitResponse {
-
+    submission_id: u32
 }
 
 #[derive(Deserialize, Debug)]
 pub struct SubmitResult {
-    state: String
+    state: String,
+    status_msg: Option<String>,
+    status_runtime: Option<String>,
+    status_memory: Option<String>,
+    compile_error: Option<String>,
+    total_correct: Option<u32>,
+    total_testcases: Option<u32>,
+    runtime_percentile: Option<f32>,
+    memory_percentile: Option<f32>,
+    run_success: Option<bool>
 }
 
 impl JudgeResult for SubmitResult {
@@ -166,7 +221,7 @@ impl JudgeResult for SubmitResult {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct LeetCodeProblem {
+pub struct Problem {
     title: String,
     title_slug: String,
     question_id: String,
@@ -176,7 +231,7 @@ pub struct LeetCodeProblem {
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct LeetCodeProblemDetial {
+pub struct ProblemDetial {
     question_id: String,
     question_frontend_id: String,
     title: String,
@@ -185,14 +240,13 @@ pub struct LeetCodeProblemDetial {
     example_testcases: String
 }
 
-impl LeetCodeProblemDetial {
+impl ProblemDetial {
     pub fn generate_sinppet(&self, lang: &str) -> Result<()> {
         if let Some(code) = self.get_template(lang) {
             let file_name = format!("{}.{}.{}", self.question_frontend_id, self.title_slug, lang);
-            io::write_to_file(&file_name, &code);
-            Ok(()) // todo handle error
+            Ok(io::write_to_file(&file_name, &code)?)
         } else {
-            Err(anyhow::anyhow!("")) // todo error message lang not support
+            Err(anyhow::anyhow!("language do not support"))
         }
     }
 
@@ -215,74 +269,69 @@ pub struct CodeSnippet {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LeetCodeRequest {
+struct Request {
     operation_name: &'static str,
     query: &'static str,
     variables: Map<String, Value>
 }
 
+impl Request {
+    fn new(operation_name: &'static str, query: &'static str) -> Self {
+        Self {
+            operation_name,
+            query,
+            variables: Map::new()
+        }
+    }
+
+    fn set_variable(mut self, key: &str, value: &str) -> Self {
+        self.variables.insert(key.into(), value.into());
+        self
+    }
+}
+
 #[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct LeetCodeResponse {
+struct Response {
     data: Value
 }
 
 #[async_trait]
 impl Provider for LeetCode {
-    type Problem = LeetCodeProblem;
-    type ProblemDetial = LeetCodeProblemDetial;
+    type Problem = Problem;
+    type ProblemDetial = ProblemDetial;
     type TestResult = TestResult;
     type SubmitResult = SubmitResult;
     fn name(&self) -> &'static str {
         "leetcode"
     }
 
-    async fn get_problem(&self, id: &str) -> Result<LeetCodeProblemDetial> {
+    async fn get_problem(&self, id: &str) -> Result<ProblemDetial> {
         let title_slug = self.get_problems().await?
             .iter().filter(|p| {
                 p.question_frontend_id == id
             })
             .map(|p| p.title_slug.clone())
             .next().ok_or(LeetCodeError::ProblemNotFound)?;
-        let mut variables = Map::new();
-        variables.insert("titleSlug".to_string(), Value::String(title_slug));
-        let body = LeetCodeRequest {
-            operation_name: "questionData",
-            query: include_str!("../payload/leetcode/get_problem.txt"),
-            variables
-        };
-        let resp = self.client.post(LEETCODE_GRAPHQL)
-            .headers(self.headers())
-            .json(&body)
-            .send().await?
-            .json::<LeetCodeResponse>().await?;
-        let problem: LeetCodeProblemDetial = serde_json::value::from_value(resp.data.get("question").unwrap().clone())?;
+        let query = include_str!("../payload/leetcode/get_problem.txt");
+        let req = Request::new("questionData", query)
+            .set_variable("titleSlug", &title_slug);
+        let resp = self.post::<_, Response>(LEETCODE_GRAPHQL, &req).await?;
+        let problem: ProblemDetial = serde_json::value::from_value(resp.data.get("question").unwrap().clone())?;
         Ok(problem)
     }
 
-    async fn get_problems(&self) -> Result<Vec<LeetCodeProblem>> {
+    async fn get_problems(&self) -> Result<Vec<Problem>> {
         if let Some(problems) = self.load_from_cache() {
             return Ok(problems);
         }
-        let variables = Map::new();
-        let body = LeetCodeRequest {
-            operation_name: "allQuestionsRaw",
-            query: include_str!("../payload/leetcode/get_problems.txt"),
-            variables
-        };
-        let resp = self.client
-            .post(LEETCODE_GRAPHQL)
-            .headers(self.headers())
-            .json(&body)
-            .send().await?
-            .json::<LeetCodeResponse>().await?;
-        let problems = if let Some(problems) = resp.data.get("allQuestions") {
-            problems.as_array().unwrap().into_iter().map(|p| {
+        let query = include_str!("../payload/leetcode/get_problems.txt");
+        let body = Request::new("allQuestionsRaw", query);
+        let resp = self.post::<_, Response>(LEETCODE_GRAPHQL, &body).await?;
+        let problems = resp.data.get("allQuestions").and_then(|problems| {
+            Some(problems.as_array().unwrap().into_iter().map(|p| {
                 serde_json::value::from_value(p.clone()).unwrap()
-            }).collect::<Vec<LeetCodeProblem>>()
-        } else {
-            vec![]
-        };
+            }).collect::<Vec<Problem>>())
+        }).unwrap_or(vec![]);
         self.write_to_cache(&problems)?;
         Ok(problems)
     }
@@ -290,16 +339,14 @@ impl Provider for LeetCode {
     async fn test_code(&self, q: &str, lang: &str, typed_code: &str) -> Result<TestResult> {
         let problem = self.get_problem(q).await?;
         let (url, req) = TestRequest::new(&problem, lang, typed_code);
-        let resp = self.client.post(url)
-            .headers(self.headers())
-            .json(&req)
-            .send().await?
-            .json::<TestResponse>().await?;
-        let result_url = format!("https://leetcode.com/submissions/detail/{}/check/", resp.interpret_id);
-        self.get_result(&result_url).await
+        let resp = self.post::<_, TestResponse>(&url, &req).await?;
+        self.get_result(&resp.interpret_id).await
     }
 
-    // async fn submit_code(&self, q: &str) {
-    //     let problem = self.get_problem(q).await;
-    // }
+    async fn submit_code(&self, q: &str, lang: &str, typed_code: &str) -> Result<SubmitResult> {
+        let problem = self.get_problem(q).await?;
+        let (url, req) = SubmitRequest::new(&problem, lang, typed_code);
+        let resp = self.post::<_, SubmitResponse>(&url, &req).await?;
+        self.get_result(&resp.submission_id.to_string()).await
+    }
 }
