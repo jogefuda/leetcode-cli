@@ -1,0 +1,14 @@
+query allQuestionsRaw {
+  allQuestions: allQuestionsRaw {
+    title
+    titleSlug
+    translatedTitle
+    questionId
+    questionFrontendId
+    status
+    difficulty
+    isPaidOnly
+    categoryTitle
+    __typename
+  }
+}
